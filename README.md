@@ -47,6 +47,12 @@ The WebSocket provider requires a [`WebSocket`](https://developer.mozilla.org/en
 
 ```js
 const wsProvider = new WebsocketProvider('ws://localhost:1234', 'my-roomname', doc, { WebSocketPolyfill: require('ws') })
+// 复用方式
+if (isRoot) {
+  rootProvider = new WebsocketProvider(WS_URL, docName, new Y.Doc({ guid: docName }), { params });
+} else {
+  wsProvider = new SubWebsocketProvider(WS_URL, docName, new Y.Doc({ guid: docName }), { rootProvider, params });
+}
 ```
 
 ## API
