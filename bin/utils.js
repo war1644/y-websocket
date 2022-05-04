@@ -20,6 +20,7 @@ const wsReadyStateOpen = 1
 const wsReadyStateClosing = 2 // eslint-disable-line
 const wsReadyStateClosed = 3 // eslint-disable-line
 
+
 // disable gc when using snapshots!
 const gcEnabled = process.env.GC !== 'false' && process.env.GC !== '0'
 const persistenceDir = process.env.YPERSISTENCE
@@ -43,7 +44,7 @@ if (typeof persistenceDir === 'string') {
         ldb.storeUpdate(docName, update)
       })
     },
-    writeState: async (docName, ydoc) => {}
+    writeState: async (docName, ydoc) => { }
   }
 }
 
@@ -71,6 +72,8 @@ exports.docs = docs
 const messageSync = 0
 const messageAwareness = 1
 // const messageAuth = 2
+const messageSubSync = 100 // 自定义协议从100开始，留出后续YJS可能使用的空间
+const messageSubAwareness = 101
 
 /**
  * @param {Uint8Array} update
@@ -79,19 +82,56 @@ const messageAwareness = 1
  */
 const updateHandler = (update, origin, doc) => {
   const encoder = encoding.createEncoder()
-  encoding.writeVarUint(encoder, messageSync)
+  if (doc.rootDocId) {
+    encoding.writeVarUint(encoder, messageSubSync)
+    encoding.writeVarString(encoder, doc.name)
+  } else {
+    encoding.writeVarUint(encoder, messageSync)
+  }
   syncProtocol.writeUpdate(encoder, update)
   const message = encoding.toUint8Array(encoder)
   doc.conns.forEach((_, conn) => send(doc, conn, message))
+}
+
+const loadMultiDocs = (subdocId, conn, rootDocId) => {
+  const isNew = !docs.has(subdocId)
+  let subdoc = getYDoc(subdocId)
+  // 通道复用
+  subdoc.conns.set(conn, new Set())
+  if (isNew) {
+    subdoc.rootDocId = rootDocId
+  } else {
+    return subdoc
+  }
+
+  // send sync step 1
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, messageSubSync)
+  encoding.writeVarString(encoder, subdoc.name)
+  syncProtocol.writeSyncStep1(encoder, subdoc)
+  send(subdoc, conn, encoding.toUint8Array(encoder))
+  // 理论上新 doc getStates size为0个，谨慎起见，还是补上这段代码逻辑
+  const awarenessStates = subdoc.awareness.getStates()
+  if (awarenessStates.size > 0) {
+    TSLog.error("subdoc.awareness.getStates size error:", awarenessStates.size)
+    const encoder = encoding.createEncoder()
+    encoding.writeVarUint(encoder, messageSubAwareness)
+    encoding.writeVarString(encoder, subdoc.name)
+    encoding.writeVarUint8Array(encoder, awarenessProtocol.encodeAwarenessUpdate(subdoc.awareness, Array.from(awarenessStates.keys())))
+    send(subdoc, conn, encoding.toUint8Array(encoder), 1)
+  }
+
+  return subdoc
 }
 
 class WSSharedDoc extends Y.Doc {
   /**
    * @param {string} name
    */
-  constructor (name) {
+  constructor(name) {
     super({ gc: gcEnabled })
     this.name = name
+    this.rootDocId = ''
     this.mux = mutex.createMutex()
     /**
      * Maps from conn to set of controlled user ids. Delete all user ids from awareness when this conn is closed
@@ -118,7 +158,12 @@ class WSSharedDoc extends Y.Doc {
       }
       // broadcast awareness update
       const encoder = encoding.createEncoder()
-      encoding.writeVarUint(encoder, messageAwareness)
+      if (this.rootDocId) {
+        encoding.writeVarUint(encoder, messageSubAwareness)
+        encoding.writeVarString(encoder, this.name)
+      } else {
+        encoding.writeVarUint(encoder, messageAwareness)
+      }
       encoding.writeVarUint8Array(encoder, awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients))
       const buff = encoding.toUint8Array(encoder)
       this.conns.forEach((_, c) => {
@@ -178,6 +223,26 @@ const messageListener = (conn, doc, message) => {
         awarenessProtocol.applyAwarenessUpdate(doc.awareness, decoding.readVarUint8Array(decoder), conn)
         break
       }
+      case messageSubSync:
+        const subdocId = decoding.readVarString(decoder)
+        const subdoc = loadMultiDocs(subdocId, conn, doc.name)
+        // now that we have the subdoc, the sync process becomes identical to the standard case.
+        // be sure to broadcast any changes uses your subsync message type
+        encoding.writeVarUint(encoder, messageSubSync)
+        encoding.writeVarString(encoder, subdocId)
+        let len = encoding.length(encoder)
+        syncProtocol.readSyncMessage(decoder, encoder, subdoc, conn)
+        // 数据上行sync1时 服务端有ydoc数据，会进行数据同步下发。子文档协议由于插入了docId数据，导致encoder长度不再是1，程序认为是有数据下发
+        if (encoding.length(encoder) > len) {
+          send(subdoc, conn, encoding.toUint8Array(encoder))
+        }
+        break
+      case messageSubAwareness: {
+        const subdocId = decoding.readVarString(decoder)
+        const subdoc = loadMultiDocs(subdocId, conn, doc.name)
+        awarenessProtocol.applyAwarenessUpdate(subdoc.awareness, decoding.readVarUint8Array(decoder), conn)
+        break
+      }
     }
   } catch (err) {
     console.error(err)
@@ -206,7 +271,9 @@ const closeConn = (doc, conn) => {
       docs.delete(doc.name)
     }
   }
-  conn.close()
+  if (doc.rootDocId) {
+    conn.close()
+  }
 }
 
 /**
