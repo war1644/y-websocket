@@ -31,11 +31,20 @@ HOST=localhost PORT=1234 npx y-websocket
 
 ```js
 import * as Y from 'yjs'
-import { WebsocketProvider } from 'y-websocket'
+import { WebsocketProvider, SubWebsocketProvider } from 'y-websocket'
 
 const doc = new Y.Doc()
-const wsProvider = new WebsocketProvider('ws://localhost:1234', 'my-roomname', doc)
+let wsProvider = new WebsocketProvider('ws://localhost:1234', 'my-roomname', doc)
+// 复用方式
+if (isRoot) {
+  rootProvider = new WebsocketProvider(WS_URL, docName, doc), { params });
+} else {
+  wsProvider = new SubWebsocketProvider(WS_URL, docName, doc), { rootProvider, params });
+}
 
+rootProvider.on('status', event => {
+  console.log(event.status) // logs "connected" or "disconnected"
+})
 wsProvider.on('status', event => {
   console.log(event.status) // logs "connected" or "disconnected"
 })
@@ -49,16 +58,16 @@ The WebSocket provider requires a [`WebSocket`](https://developer.mozilla.org/en
 const wsProvider = new WebsocketProvider('ws://localhost:1234', 'my-roomname', doc, { WebSocketPolyfill: require('ws') })
 // 复用方式
 if (isRoot) {
-  rootProvider = new WebsocketProvider(WS_URL, docName, new Y.Doc({ guid: docName }), { params });
+  rootProvider = new WebsocketProvider(WS_URL, docName, doc), { params });
 } else {
-  wsProvider = new SubWebsocketProvider(WS_URL, docName, new Y.Doc({ guid: docName }), { rootProvider, params });
+  wsProvider = new SubWebsocketProvider(WS_URL, docName, doc, { rootProvider, params });
 }
 ```
 
 ## API
 
 ```js
-import { WebsocketProvider } from 'y-websocket'
+import { WebsocketProvider, SubWebsocketProvider } from 'y-websocket'
 ```
 
 <dl>
